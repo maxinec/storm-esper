@@ -70,14 +70,14 @@
 
   <dependencies>
     <dependency>
-      <groupId>storm</groupId>
-      <artifactId>storm</artifactId>
-      <version>0.8.1</version>
+      <groupId>org.apache.storm</groupId>
+      <artifactId>storm-core</artifactId>
+      <version>1.0.1</version>
     </dependency>
     <dependency>
       <groupId>com.espertech</groupId>
       <artifactId>esper</artifactId>
-      <version>4.3.0</version>
+      <version>5.4.0</version>
     </dependency>
 
     <dependency>

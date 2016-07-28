@@ -1,6 +1,6 @@
 package org.tomdz.storm.esper;
 
-import backtype.storm.tuple.Fields;
+import org.apache.storm.tuple.Fields;
 
 import java.io.Serializable;
 
