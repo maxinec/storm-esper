@@ -86,6 +86,11 @@ public class TwitterSpout extends BaseRichSpout implements StatusListener
     }
 
     @Override
+    public void onStallWarning(StallWarning stallWarning)
+    {
+    }
+
+    @Override
     public void close()
     {
         twitterStream.shutdown();

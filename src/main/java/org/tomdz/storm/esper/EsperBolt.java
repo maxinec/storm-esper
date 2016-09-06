@@ -2,6 +2,7 @@ package org.tomdz.storm.esper;
 
 import com.espertech.esper.client.*;
 import org.apache.storm.generated.GlobalStreamId;
+import org.apache.storm.metric.api.MultiCountMetric;
 import org.apache.storm.task.OutputCollector;
 import org.apache.storm.task.TopologyContext;
 import org.apache.storm.topology.OutputFieldsDeclarer;
@@ -14,6 +15,8 @@ import java.util.*;
 public class EsperBolt extends BaseRichBolt implements UpdateListener
 {
     private static final long serialVersionUID = 1L;
+    private transient MultiCountMetric emitMultiCountMetric;
+    private transient MultiCountMetric eventMultiCountMetric;
 
     public static class Builder
     {
@@ -42,6 +45,11 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
         public StatementsBuilder statements()
         {
             return new StatementsBuilder(bolt);
+        }
+
+        public ConfigBuilder configs()
+        {
+            return new ConfigBuilder(bolt);
         }
 
         public EsperBolt build()
@@ -202,6 +210,20 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
         }
     }
 
+    public static final class ConfigBuilder extends Builder
+    {
+        private ConfigBuilder(EsperBolt bolt)
+        {
+            super(bolt);
+        }
+
+        public ConfigBuilder add(String key, Object value)
+        {
+            bolt.getComponentConfiguration().put(key, value);
+            return this;
+        }
+    }
+
     private final Map<StreamId, String> inputAliases = new LinkedHashMap<StreamId, String>();
     private final Map<StreamId, TupleTypeDescriptor> tupleTypes = new LinkedHashMap<StreamId, TupleTypeDescriptor>();
     private final Map<String, EventTypeDescriptor> eventTypes = new LinkedHashMap<String, EventTypeDescriptor>();
@@ -210,6 +232,7 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
     private transient EPRuntime runtime;
     private transient EPAdministrator admin;
     private transient OutputCollector collector;
+    private final Map<String, Object> componentConfiguration = new HashMap<String, Object>();
 
     private EsperBolt()
     {
@@ -259,6 +282,11 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
     }
 
     @Override
+    public Map<String, Object> getComponentConfiguration() {
+        return this.componentConfiguration;
+    }
+
+    @Override
     public void declareOutputFields(OutputFieldsDeclarer declarer)
     {
         for (EventTypeDescriptor eventType: eventTypes.values()) {
@@ -273,6 +301,11 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
     {
         this.collector = collector;
 
+        this.emitMultiCountMetric = new MultiCountMetric();
+        this.eventMultiCountMetric = new MultiCountMetric();
+        context.registerMetric("esper_emit_count", emitMultiCountMetric, 60);
+        context.registerMetric("esper_runtime_sendevent_count", eventMultiCountMetric, 60);
+
         Configuration configuration = new Configuration();
 
         setupEventTypes(context, configuration);
@@ -282,9 +315,18 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
         this.runtime = esperSink.getEPRuntime();
         this.admin = esperSink.getEPAdministrator();
 
+        if (!this.componentConfiguration.isEmpty())
+        {
+            ConfigurationOperations configOp = this.admin.getConfiguration();
+            for (Map.Entry<String, Object> entry : this.componentConfiguration.entrySet()) {
+                String key = entry.getKey();
+                Object value = entry.getValue();
+                configOp.addVariable(key, value.getClass(), value);
+            }
+        }
+
         for (String stmt : statements) {
             EPStatement statement = admin.createEPL(stmt);
-
             statement.addListener(this);
         }
     }
@@ -358,6 +400,7 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
         }
 
         runtime.sendEvent(data, eventType);
+        this.eventMultiCountMetric.scope(eventType).incr();
         collector.ack(tuple);
     }
 
@@ -374,6 +417,7 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
                 }
                 if (eventType != null) {
                     collector.emit(eventType.getStreamId(), toTuple(newEvent, eventType.getFields()));
+                    this.emitMultiCountMetric.scope(eventType.getName()).incr();
                 }
             }
         }

@@ -98,23 +98,23 @@ public class StormEsperTest
         assertEquals(actual, expected);
     }
 
-//    @SuppressWarnings("unchecked")
-//    public void testSimple() throws Exception
-//    {
-//        TestSpout spout = new TestSpout(new Fields("a", "b"), tuple(4, 1), tuple(2, 3), tuple(1, 2), tuple(3, 4));
-//        EsperBolt esperBolt = new EsperBolt.Builder()
-//                                           .inputs().aliasComponent("spout1A").withFields("a", "b").ofType(Integer.class).toEventType("Test1A")
-//                                           .outputs().onDefaultStream().emit("max", "sum")
-//                                           .statements().add("select max(a) as max, sum(b) as sum from Test1A.win:length_batch(4)")
-//                                           .build();
-//
-//        runTest(new TestTopologyBuilder().addSpout("spout1A", spout)
-//                                         .addBolt("bolt1A", esperBolt)
-//                                         .addBolt(GATHERER, new GatheringBolt())
-//                                         .connect("spout1A", "bolt1A")
-//                                         .connect("bolt1A", GATHERER),
-//                new Event("bolt1A", "default", null, 4, 10));
-//    }
+    @SuppressWarnings("unchecked")
+    public void testSimple() throws Exception
+    {
+        TestSpout spout = new TestSpout(new Fields("a", "b"), tuple(4, 1), tuple(2, 3), tuple(1, 2), tuple(3, 4));
+        EsperBolt esperBolt = new EsperBolt.Builder()
+                                           .inputs().aliasComponent("spout1A").withFields("a", "b").ofType(Integer.class).toEventType("Test1A")
+                                           .outputs().onDefaultStream().emit("max", "sum")
+                                           .statements().add("select max(a) as max, sum(b) as sum from Test1A.win:length_batch(4)")
+                                           .build();
+
+        runTest(new TestTopologyBuilder().addSpout("spout1A", spout)
+                                         .addBolt("bolt1A", esperBolt)
+                                         .addBolt(GATHERER, new GatheringBolt())
+                                         .connect("spout1A", "bolt1A")
+                                         .connect("bolt1A", GATHERER),
+                new Event("bolt1A", "default", null, 4, 10));
+    }
 
     @SuppressWarnings("unchecked")
     public void testMultipleStatements() throws Exception
