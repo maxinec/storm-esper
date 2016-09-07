@@ -234,7 +234,7 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
     private transient OutputCollector collector;
     private final Map<String, Object> componentConfiguration = new HashMap<String, Object>();
 
-    private EsperBolt()
+    public EsperBolt()
     {
     }
 
