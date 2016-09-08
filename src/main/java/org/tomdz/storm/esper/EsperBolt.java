@@ -27,7 +27,7 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
             this(new EsperBolt());
         }
 
-        protected Builder(EsperBolt bolt)
+        public Builder(EsperBolt bolt)
         {
             this.bolt = bolt;
         }
