@@ -28,7 +28,7 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
             this(new EsperBolt());
         }
 
-        protected Builder(EsperBolt bolt)
+        public Builder(EsperBolt bolt)
         {
             this.bolt = bolt;
         }
@@ -262,7 +262,7 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
     private transient OutputCollector collector;
     private final Map<String, Object> componentConfiguration = new HashMap<String, Object>();
 
-    private EsperBolt()
+    public EsperBolt()
     {
     }
 
