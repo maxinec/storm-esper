@@ -9,6 +9,7 @@ import org.apache.storm.topology.OutputFieldsDeclarer;
 import org.apache.storm.topology.base.BaseRichBolt;
 import org.apache.storm.tuple.Fields;
 import org.apache.storm.tuple.Tuple;
+import org.tomdz.storm.esper.model.Event;
 
 import java.util.*;
 
@@ -73,6 +74,28 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
         public AliasedInputBuilder aliasStream(String componentId, String streamId)
         {
             return new AliasedInputBuilder(bolt, new StreamId(componentId, streamId));
+        }
+
+        public InputsBuilder onStreamEvent(Event event, String componentId)
+        {
+            return getInputsBuilderFromAliasedBuilder(
+                aliasStream(componentId, event.getStreamName()),
+                event
+            );
+        }
+
+        public InputsBuilder onComponentEvent(Event event, String componentId)
+        {
+            return getInputsBuilderFromAliasedBuilder(aliasComponent(componentId), event);
+        }
+
+        private InputsBuilder getInputsBuilderFromAliasedBuilder(AliasedInputBuilder aliasedBuilder, Event event)
+        {
+            Map<Class, String[]> model = event.getModelByType();
+            for (Class field : model.keySet()) {
+                aliasedBuilder = aliasedBuilder.withFields(model.get(field)).ofType(field);
+            }
+            return aliasedBuilder.toEventType(event.getEventName());
         }
     }
 
@@ -150,6 +173,11 @@ public class EsperBolt extends BaseRichBolt implements UpdateListener
         public OutputStreamBuilder onDefaultStream()
         {
             return new OutputStreamBuilder(bolt, "default");
+        }
+
+        public OutputsBuilder onEvent(Event event)
+        {
+            return onStream(event.getStreamName()).fromEventType(event.getEventName()).emit(event.getModels());
         }
     }
 

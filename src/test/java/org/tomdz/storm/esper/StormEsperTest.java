@@ -1,246 +1,396 @@
 package org.tomdz.storm.esper;
 
 import org.apache.storm.Config;
-import org.apache.storm.LocalCluster;
+import org.apache.storm.ILocalCluster;
+import org.apache.storm.Testing;
 import org.apache.storm.generated.StormTopology;
+import org.apache.storm.testing.CompleteTopologyParam;
+import org.apache.storm.testing.MkClusterParam;
+import org.apache.storm.testing.MockedSources;
+import org.apache.storm.testing.TestJob;
+import org.apache.storm.topology.TopologyBuilder;
 import org.apache.storm.tuple.Fields;
-import org.apache.storm.tuple.Tuple;
+import org.apache.storm.tuple.Values;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import java.io.IOException;
-import java.net.ServerSocket;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.Set;
-import java.util.concurrent.Callable;
+import java.util.Map;
 
-import static com.jayway.awaitility.Awaitility.await;
-import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.apache.storm.utils.Utils.tuple;
-import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertTrue;
 
 @Test
 public class StormEsperTest
 {
-    private static final String GATHERER = "gatherer";
-    private LocalCluster cluster;
-    private String topologyName;
+    private final String GATHERING_BOLT_ID = "gathering-bolt";
 
     @BeforeMethod(alwaysRun = true)
     public void setUp()
     {
-        cluster = new LocalCluster();
-        topologyName = "test" + System.currentTimeMillis();
     }
 
     @AfterMethod(alwaysRun = true)
     public void tearDown() throws Exception
     {
-        cluster.killTopology(topologyName);
-        cluster.shutdown();
     }
 
-    private int getFreePort() throws IOException
-    {
-        ServerSocket socket = new ServerSocket(0);
-
-        int port = socket.getLocalPort();
-
-        socket.close();
-
-        return port;
-    }
-    
-    private void runTest(final TestTopologyBuilder topologyBuilder,
-                         final Event... expectedData) throws Exception
-    {
-        final StormTopology topology = topologyBuilder.build();
-        final GatheringBolt gatheringBolt = (GatheringBolt)topologyBuilder.getBolt(GATHERER);
-        final Config conf = new Config();
-
-        conf.setDebug(true);
-        conf.put(Config.STORM_ZOOKEEPER_PORT, getFreePort());
-        conf.put(Config.NIMBUS_THRIFT_PORT, getFreePort());
-
-        cluster.submitTopology(topologyName, conf, topology);
-
-        await().atMost(10, SECONDS).until(new Callable<Boolean>() {
-            @Override
-            public Boolean call() throws Exception {
-            return gatheringBolt.getGatheredData().size() == expectedData.length;
-            }
-        });
-
-        Set<Event> actual = new HashSet<Event>();
-        Set<Event> expected = new HashSet<Event>(Arrays.asList(expectedData));
-
-        for (Tuple tuple : gatheringBolt.getGatheredData()) {
-            String componentId = tuple.getSourceComponent();
-            String streamId = tuple.getSourceStreamId();
-            EsperBolt bolt = (EsperBolt)topologyBuilder.getBolt(componentId);
-
-            // we'll ignore data from other bolts (such as bolts from previous tests
-            // which for some reason are still around)
-            if (bolt == null) {
-                System.err.println("Didn't find bolt for " + componentId + ", " + streamId);
-            }
-            else {
-                EventTypeDescriptor eventType = bolt.getEventTypeForStreamId(streamId);
-
-                assertEquals(new HashSet<String>(tuple.getFields().toList()),
-                             new HashSet<String>(eventType.getFields().toList()));
-
-                actual.add(new Event(componentId, streamId, eventType.getName(), tuple.getValues().toArray()));
-            }
-        }
-        assertEquals(actual, expected);
+    private MkClusterParam getMkClusterParam(){
+        MkClusterParam mkClusterParam = new MkClusterParam();
+        mkClusterParam.setSupervisors(1);
+        Config daemonConf = new Config();
+        daemonConf.put(Config.STORM_LOCAL_MODE_ZMQ, false);
+        mkClusterParam.setDaemonConf(daemonConf);
+        return mkClusterParam;
     }
 
-    @SuppressWarnings("unchecked")
+    @Test
     public void testSimple() throws Exception
     {
-        TestSpout spout = new TestSpout(new Fields("a", "b"), tuple(4, 1), tuple(2, 3), tuple(1, 2), tuple(3, 4));
-        EsperBolt esperBolt = new EsperBolt.Builder()
-                                           .inputs().aliasComponent("spout1A").withFields("a", "b").ofType(Integer.class).toEventType("Test1A")
-                                           .outputs().onDefaultStream().emit("max", "sum")
-                                           .statements().add("select max(a) as max, sum(b) as sum from Test1A.win:length_batch(4)")
-                                           .build();
+        TestJob testJob = new EsperTestJob(
+        ) {
+            @Override
+            public void run(ILocalCluster cluster) {
+                String spoutId = "spout";
+                String esperBoltId = "esper-bolt";
+                String eventId = "TestEvent";
 
-        runTest(new TestTopologyBuilder().addSpout("spout1A", spout)
-                                         .addBolt("bolt1A", esperBolt)
-                                         .addBolt(GATHERER, new GatheringBolt())
-                                         .connect("spout1A", "bolt1A")
-                                         .connect("bolt1A", GATHERER),
-                new Event("bolt1A", "default", null, 4, 10));
+                // build the test topology
+                TopologyBuilder builder = new TopologyBuilder();
+                TestSpout spout = new TestSpout(new Fields("a", "b"));
+                builder.setSpout(spoutId, spout);
+
+                EsperBolt esperBolt = new EsperBolt.Builder()
+                    .inputs().aliasComponent(spoutId).withFields("a", "b").ofType(Integer.class).toEventType(eventId)
+                    .outputs().onDefaultStream().emit("max", "sum")
+                    .statements().add("select max(a) as max, sum(b) as sum from " + eventId + ".win:length_batch(4)")
+                    .build();
+                builder
+                    .setBolt(esperBoltId, esperBolt)
+                    .globalGrouping(spoutId);
+
+                GatheringBolt gatheringBolt = new GatheringBolt();
+                builder.setBolt(GATHERING_BOLT_ID, gatheringBolt).globalGrouping(esperBoltId);
+
+                StormTopology topology = builder.createTopology();
+
+                CompleteTopologyParam completeTopologyParam = createTestDataConfig(
+                    spoutId, new Values(4, 1), new Values(2, 3), new Values(1, 2), new Values(3, 4)
+                );
+
+                Map result = Testing.completeTopology(cluster, topology, completeTopologyParam);
+                assertTrue(
+                    Testing.multiseteq(
+                        new Values(
+                            new Values(4, 10)
+                        ),
+                        Testing.readTuples(result, esperBoltId)
+                    )
+                );
+                assertEventTypesEqual(esperBolt, gatheringBolt);
+            }
+        };
+        Testing.withSimulatedTimeLocalCluster(getMkClusterParam(), testJob);
     }
 
-    @SuppressWarnings("unchecked")
+    @Test
     public void testMultipleStatements() throws Exception
     {
-        TestSpout spout = new TestSpout(new Fields("a", "b"), tuple(4, 1), tuple(2, 3), tuple(1, 2), tuple(3, 4));
-        EsperBolt esperBolt = new EsperBolt.Builder()
-                                           .inputs().aliasComponent("spout2A").toEventType("Test2A")
-                                           .outputs().onStream("stream1").fromEventType("MaxValue").emit("max")
-                                                     .onStream("stream2").fromEventType("MinValue").emit("min")
-                                           .statements().add("insert into MaxValue select max(a) as max from Test2A.win:length_batch(4)")
-                                                        .add("insert into MinValue select min(b) as min from Test2A.win:length_batch(4)")
-                                           .build();
+        TestJob testJob = new EsperTestJob(
+        ) {
+            @Override
+            public void run(ILocalCluster cluster) {
+                String spoutId = "spout";
+                String esperBoltId = "esper-bolt";
+                String stream1Id = "stream1";
+                String stream2Id = "stream2";
+                String eventId = "TestEvent";
 
-        runTest(new TestTopologyBuilder().addSpout("spout2A", spout)
-                                         .addBolt("bolt2A", esperBolt)
-                                         .addBolt(GATHERER, new GatheringBolt())
-                                         .connect("spout2A", "bolt2A")
-                                         .connect("bolt2A", "stream1", GATHERER)
-                                         .connect("bolt2A", "stream2", GATHERER),
-                new Event("bolt2A", "stream1", "MaxValue", 4),
-                new Event("bolt2A", "stream2", "MinValue", 1));
+                // build the test topology
+                TopologyBuilder builder = new TopologyBuilder();
+                TestSpout spout = new TestSpout(new Fields("a", "b"));
+                builder.setSpout(spoutId, spout);
+
+                EsperBolt esperBolt = new EsperBolt.Builder()
+                    .inputs().aliasComponent(spoutId).toEventType(eventId)
+                    .outputs().onStream(stream1Id).fromEventType("MaxValue").emit("max")
+                    .onStream(stream2Id).fromEventType("MinValue").emit("min")
+                    .statements().add("insert into MaxValue select max(a) as max from " + eventId + ".win:length_batch(4)")
+                    .add("insert into MinValue select min(b) as min from " + eventId + ".win:length_batch(4)")
+                    .build();
+                builder
+                    .setBolt(esperBoltId, esperBolt)
+                    .globalGrouping(spoutId);
+
+                GatheringBolt gatheringBolt = new GatheringBolt();
+                builder.setBolt(GATHERING_BOLT_ID, gatheringBolt)
+                    .globalGrouping(esperBoltId, stream1Id)
+                    .globalGrouping(esperBoltId, stream2Id);
+
+                StormTopology topology = builder.createTopology();
+
+                CompleteTopologyParam completeTopologyParam = createTestDataConfig(
+                    spoutId, new Values(4, 1), new Values(2, 3), new Values(1, 2), new Values(3, 4)
+                );
+
+                Map result = Testing.completeTopology(cluster, topology, completeTopologyParam);
+                assertTrue(
+                    Testing.multiseteq(
+                        new Values(
+                            new Values(4)
+                        ),
+                        Testing.readTuples(result, esperBoltId, stream1Id)
+                    )
+                );
+                assertTrue(
+                    Testing.multiseteq(
+                        new Values(
+                            new Values(1)
+                        ),
+                        Testing.readTuples(result, esperBoltId, stream2Id)
+                    )
+                );
+                assertEventTypesEqual(esperBolt, gatheringBolt);
+            }
+        };
+        Testing.withSimulatedTimeLocalCluster(getMkClusterParam(), testJob);
     }
 
-    @SuppressWarnings("unchecked")
+    @Test
     public void testMultipleSpouts() throws Exception
     {
-        TestSpout spout1 = new TestSpout(new Fields("a"), tuple(4), tuple(2), tuple(1), tuple(3));
-        TestSpout spout2 = new TestSpout(new Fields("b"), tuple(1), tuple(3), tuple(2), tuple(4));
-        EsperBolt esperBolt = new EsperBolt.Builder()
-                                           .inputs().aliasComponent("spout3A").toEventType("Test3A")
-                                                    .aliasComponent("spout3B").toEventType("Test3B")
-                                           .outputs().onDefaultStream().emit("min", "max")
-                                           .statements().add("select max(a) as max, min(b) as min from Test3A.win:length_batch(4), Test3B.win:length_batch(4)")
-                                           .build();
+        TestJob testJob = new EsperTestJob(
+        ) {
+            @Override
+            public void run(ILocalCluster cluster) {
+                String spout1Id = "spout1";
+                String spout2Id = "spout2";
+                String event1Id = "Event1";
+                String event2Id = "Event2";
+                String esperBoltId = "esper";
 
-        runTest(new TestTopologyBuilder().addSpout("spout3A", spout1)
-                                         .addSpout("spout3B", spout2)
-                                         .addBolt("bolt3A", esperBolt)
-                                         .addBolt(GATHERER, new GatheringBolt())
-                                         .connect("spout3A", "bolt3A")
-                                         .connect("spout3B", "bolt3A")
-                                         .connect("bolt3A", GATHERER),
-                new Event("bolt3A", "default", null, 1, 4));
+                // build the test topology
+                TopologyBuilder builder = new TopologyBuilder();
+                TestSpout spout1 = new TestSpout(new Fields("a"));
+                builder.setSpout(spout1Id, spout1);
+                TestSpout spout2 = new TestSpout(new Fields("b"));
+                builder.setSpout(spout2Id, spout2);
+
+                EsperBolt esperBolt = new EsperBolt.Builder()
+                                           .inputs().aliasComponent(spout1Id).toEventType(event1Id)
+                                                    .aliasComponent(spout2Id).toEventType(event2Id)
+                                           .outputs().onDefaultStream().emit("min", "max")
+                                           .statements().add(
+                                               "select max(a) as max, min(b) as min " +
+                                               "from " + event1Id + ".win:length_batch(4), " + event2Id + ".win:length_batch(4)"
+                                            )
+                                           .build();
+                builder
+                    .setBolt(esperBoltId, esperBolt)
+                    .globalGrouping(spout1Id)
+                    .globalGrouping(spout2Id);
+
+                GatheringBolt gatheringBolt = new GatheringBolt();
+                builder.setBolt(GATHERING_BOLT_ID, gatheringBolt).globalGrouping(esperBoltId);
+
+                StormTopology topology = builder.createTopology();
+
+                MockedSources mockedSources = new MockedSources();
+                mockedSources.addMockData(spout1Id, new Values(4), new Values(2), new Values(1), new Values(3));
+                mockedSources.addMockData(spout2Id, new Values(1), new Values(3), new Values(2), new Values(4));
+
+                CompleteTopologyParam completeTopologyParam = createConfig(mockedSources);
+
+                Map result = Testing.completeTopology(cluster, topology, completeTopologyParam);
+                assertTrue(
+                    Testing.multiseteq(
+                        new Values(
+                            new Values(1, 4)
+                        ),
+                        Testing.readTuples(result, esperBoltId)
+                    )
+                );
+                assertEventTypesEqual(esperBolt, gatheringBolt);
+            }
+        };
+        Testing.withSimulatedTimeLocalCluster(getMkClusterParam(), testJob);
     }
 
-    @SuppressWarnings("unchecked")
+    @Test
     public void testNoInputAlias() throws Exception
     {
-        TestSpout spout = new TestSpout(new Fields("a", "b"), tuple(4, 1), tuple(2, 3), tuple(1, 2), tuple(3, 4));
-        EsperBolt esperBolt = new EsperBolt.Builder()
-                                           .outputs().onDefaultStream().emit("min", "max")
-                                           .statements().add("select max(a) as max, min(b) as min from spout4A_default.win:length_batch(4)")
-                                           .build();
+        TestJob testJob = new EsperTestJob(
+        ) {
+            @Override
+            public void run(ILocalCluster cluster) {
+                String spoutId = "spout";
+                String esperBoltId = "esper-bolt";
+                // build the test topology
+                TopologyBuilder builder = new TopologyBuilder();
+                TestSpout spout = new TestSpout(new Fields("a", "b"));
+                builder.setSpout(spoutId, spout);
 
-        runTest(new TestTopologyBuilder().addSpout("spout4A", spout)
-                                         .addBolt("bolt4A", esperBolt)
-                                         .addBolt(GATHERER, new GatheringBolt())
-                                         .connect("spout4A", "bolt4A")
-                                         .connect("bolt4A", GATHERER),
-                new Event("bolt4A", "default", null, 1, 4));
+                EsperBolt esperBolt = new EsperBolt.Builder()
+                    .outputs().onDefaultStream().emit("min", "max")
+                    .statements().add("select max(a) as max, min(b) as min from " + spoutId + "_default.win:length_batch(4)")
+                    .build();
+                builder
+                    .setBolt(esperBoltId, esperBolt)
+                    .globalGrouping(spoutId);
+
+                GatheringBolt gatheringBolt = new GatheringBolt();
+                builder.setBolt(GATHERING_BOLT_ID, gatheringBolt)
+                    .globalGrouping(esperBoltId);
+
+                StormTopology topology = builder.createTopology();
+
+                CompleteTopologyParam completeTopologyParam = createTestDataConfig(
+                    spoutId, new Values(4, 1), new Values(2, 3), new Values(1, 2), new Values(3, 4)
+                );
+
+                Map result = Testing.completeTopology(cluster, topology, completeTopologyParam);
+                assertTrue(
+                    Testing.multiseteq(
+                        new Values(
+                            new Values(1, 4)
+                        ),
+                        Testing.readTuples(result, esperBoltId, "default")
+                    )
+                );
+                assertEventTypesEqual(esperBolt, gatheringBolt);
+            }
+        };
+        Testing.withSimulatedTimeLocalCluster(getMkClusterParam(), testJob);
     }
 
-//    @SuppressWarnings("unchecked")
-//    public void testMultipleSpoutsWithoutInputAlias() throws Exception
-//    {
-//        TestSpout spout1 = new TestSpout(new Fields("a"), tuple(4), tuple(2), tuple(1), tuple(3));
-//        TestSpout spout2 = new TestSpout(new Fields("b"), tuple(1), tuple(3), tuple(2), tuple(4));
-//        EsperBolt esperBolt = new EsperBolt.Builder()
-//                                           .inputs().aliasStream("spout5A", "default").toEventType("Test5A")
-//                                           .outputs().onDefaultStream().emit("min", "max")
-//                                           .statements().add("select max(a) as max, min(b) as min from Test5A.win:length_batch(4), spout5B_default.win:length_batch(4)")
-//                                           .build();
-//
-//        runTest(new TestTopologyBuilder().addSpout("spout5A", spout1)
-//                                         .addSpout("spout5B", spout2)
-//                                         .addBolt("bolt5A", esperBolt)
-//                                         .addBolt(GATHERER, new GatheringBolt())
-//                                         .connect("spout5A", "bolt5A")
-//                                         .connect("spout5B", "bolt5A")
-//                                         .connect("bolt5A", GATHERER),
-//                new Event("bolt5A", "default", null, 1, 4));
-//    }
+    @Test
+    public void testMultipleSpoutsWithoutInputAlias() throws Exception
+    {
+        TestJob testJob = new EsperTestJob(
+        ) {
+            @Override
+            public void run(ILocalCluster cluster) {
+                String spout1Id = "spout1";
+                String spout2Id = "spout2";
+                String esperBoltId = "esper-bolt";
+                String eventId = "TestEvent";
 
-    @SuppressWarnings("unchecked")
+                // build the test topology
+                TopologyBuilder builder = new TopologyBuilder();
+                TestSpout spout1 = new TestSpout(new Fields("a"));
+                builder.setSpout(spout1Id, spout1);
+                TestSpout spout2 = new TestSpout(new Fields("b"));
+                builder.setSpout(spout2Id, spout2);
+
+                EsperBolt esperBolt = new EsperBolt.Builder()
+                    .inputs().aliasStream(spout1Id, "default").toEventType(eventId)
+                    .outputs().onDefaultStream().emit("min", "max")
+                    .statements().add("select max(a) as max, min(b) as min from " + eventId + ".win:length_batch(4), " + spout2Id + "_default.win:length_batch(4)")
+                    .build();
+                
+                builder
+                    .setBolt(esperBoltId, esperBolt)
+                    .globalGrouping(spout1Id)
+                    .globalGrouping(spout2Id);
+
+                GatheringBolt gatheringBolt = new GatheringBolt();
+                builder.setBolt(GATHERING_BOLT_ID, gatheringBolt)
+                    .globalGrouping(esperBoltId);
+
+                StormTopology topology = builder.createTopology();
+
+                MockedSources mockedSources = new MockedSources();
+                mockedSources.addMockData(spout1Id, new Values(4), new Values(2), new Values(1), new Values(3));
+                mockedSources.addMockData(spout2Id, new Values(1), new Values(3), new Values(2), new Values(4));
+                CompleteTopologyParam completeTopologyParam = createConfig(mockedSources);
+
+                Map result = Testing.completeTopology(cluster, topology, completeTopologyParam);
+                assertTrue(
+                    Testing.multiseteq(
+                        new Values(
+                            new Values(1, 4)
+                        ),
+                        Testing.readTuples(result, esperBoltId, "default")
+                    )
+                );
+                assertEventTypesEqual(esperBolt, gatheringBolt);
+            }
+        };
+        Testing.withSimulatedTimeLocalCluster(getMkClusterParam(), testJob);
+    }
+
+    @Test
     public void testMultipleBolts() throws Exception
     {
-        TestSpout spout1 = new TestSpout(new Fields("a"), tuple(4), tuple(2), tuple(1), tuple(3));
-        TestSpout spout2 = new TestSpout(new Fields("b"), tuple(1), tuple(3), tuple(2), tuple(4));
-        EsperBolt esperBolt1 = new EsperBolt.Builder()
-                                            .inputs().aliasComponent("spout6A").toEventType("Test6A")
-                                            .outputs().onDefaultStream().emit("max")
-                                            .statements().add("select max(a) as max from Test6A.win:length_batch(4)")
-                                            .build();
-        EsperBolt esperBolt2 = new EsperBolt.Builder()
-                                            .inputs().aliasComponent("spout6B").toEventType("Test6B")
-                                            .outputs().onDefaultStream().emit("min")
-                                            .statements().add("select min(b) as min from Test6B.win:length_batch(4)")
-                                            .build();
+        TestJob testJob = new EsperTestJob(
+        ) {
+            @Override
+            public void run(ILocalCluster cluster) {
+                String spout1Id = "spout1";
+                String spout2Id = "spout2";
+                String esperBolt1Id = "esper-bolt1";
+                String esperBolt2Id = "esper-bolt2";
+                String event1Id = "TestEvent1";
+                String event2Id = "TestEvent2";
 
-        runTest(new TestTopologyBuilder().addSpout("spout6A", spout1)
-                                         .addSpout("spout6B", spout2)
-                                         .addBolt("bolt6A", esperBolt1)
-                                         .addBolt("bolt6B", esperBolt2)
-                                         .addBolt(GATHERER, new GatheringBolt())
-                                         .connect("spout6A", "bolt6A")
-                                         .connect("spout6B", "bolt6B")
-                                         .connect("bolt6A", GATHERER)
-                                         .connect("bolt6B", GATHERER),
-                new Event("bolt6A", "default", null, 4),
-                new Event("bolt6B", "default", null, 1));
+                // build the test topology
+                TopologyBuilder builder = new TopologyBuilder();
+                TestSpout spout1 = new TestSpout(new Fields("a"));
+                builder.setSpout(spout1Id, spout1);
+                TestSpout spout2 = new TestSpout(new Fields("b"));
+                builder.setSpout(spout2Id, spout2);
+
+                EsperBolt esperBolt1 = new EsperBolt.Builder()
+                    .inputs().aliasComponent(spout1Id).toEventType(event1Id)
+                    .outputs().onDefaultStream().emit("max")
+                    .statements().add("select max(a) as max from " + event1Id + ".win:length_batch(4)")
+                    .build();
+                EsperBolt esperBolt2 = new EsperBolt.Builder()
+                    .inputs().aliasComponent(spout2Id).toEventType(event2Id)
+                    .outputs().onDefaultStream().emit("min")
+                    .statements().add("select min(b) as min from " + event2Id + ".win:length_batch(4)")
+                    .build();
+
+                builder
+                    .setBolt(esperBolt1Id, esperBolt1)
+                    .globalGrouping(spout1Id);
+                builder
+                    .setBolt(esperBolt2Id, esperBolt2)
+                    .globalGrouping(spout2Id);
+
+                GatheringBolt gatheringBolt = new GatheringBolt();
+                builder.setBolt(GATHERING_BOLT_ID, gatheringBolt)
+                    .globalGrouping(esperBolt1Id)
+                    .globalGrouping(esperBolt2Id);
+
+                StormTopology topology = builder.createTopology();
+
+                MockedSources mockedSources = new MockedSources();
+                mockedSources.addMockData(spout1Id, new Values(4), new Values(2), new Values(1), new Values(3));
+                mockedSources.addMockData(spout2Id, new Values(1), new Values(3), new Values(2), new Values(4));
+                CompleteTopologyParam completeTopologyParam = createConfig(mockedSources);
+
+                Map result = Testing.completeTopology(cluster, topology, completeTopologyParam);
+                assertTrue(
+                    Testing.multiseteq(
+                        new Values(
+                            new Values(4)
+                        ),
+                        Testing.readTuples(result, esperBolt1Id, "default")
+                    )
+                );
+                assertTrue(
+                    Testing.multiseteq(
+                        new Values(
+                            new Values(1)
+                        ),
+                        Testing.readTuples(result, esperBolt2Id, "default")
+                    )
+                );
+            }
+        };
+        Testing.withSimulatedTimeLocalCluster(getMkClusterParam(), testJob);
     }
 
-    // Can't test this yet because we can't catch the error ?
-    @Test(enabled = false)
-    public void testNoSuchSpout() throws Exception
-    {
-        EsperBolt esperBolt = new EsperBolt.Builder()
-                                           .outputs().onDefaultStream().emit("min", "max")
-                                           .statements().add("select max(a) as max, min(b) as min from spout7A_default.win:length_batch(4)")
-                                           .build();
-
-        runTest(new TestTopologyBuilder().addBolt("bolt7A", esperBolt)
-                                         .addBolt(GATHERER, new GatheringBolt())
-                                         .connect("spout7A", "bolt7A")
-                                         .connect("bolt7A", GATHERER));
-    }
     // TODO: more tests
     // adding aliasComponent for undefined spout
     // using the same aliasComponent twice
