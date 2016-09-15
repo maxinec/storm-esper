@@ -6,7 +6,6 @@ import org.apache.storm.topology.OutputFieldsDeclarer;
 import org.apache.storm.topology.base.BaseRichSpout;
 import org.apache.storm.tuple.Fields;
 
-import java.util.List;
 import java.util.Map;
 
 public class TestSpout extends BaseRichSpout
@@ -14,14 +13,10 @@ public class TestSpout extends BaseRichSpout
     private static final long serialVersionUID = 1L;
 
     private final Fields fields;
-    private final List<Object>[] data;
-    private transient int curIdx;
-    private transient SpoutOutputCollector collector;
 
-    public TestSpout(Fields fields, List<Object>... data)
+    public TestSpout(Fields fields)
     {
         this.fields = fields;
-        this.data = data;
     }
 
     @Override
@@ -31,27 +26,12 @@ public class TestSpout extends BaseRichSpout
     }
 
     @Override
-    public void nextTuple()
-    {
-        if (curIdx < data.length) {
-            collector.emit(data[curIdx++]);
-        }
+    public void open(Map map, TopologyContext topologyContext, SpoutOutputCollector spoutOutputCollector) {
+
     }
 
     @Override
-    public void open(@SuppressWarnings("rawtypes") Map conf,
-                     TopologyContext context,
-                     SpoutOutputCollector collector)
-    {
-        this.collector = collector;
+    public void nextTuple() {
+
     }
-
-    @Override
-    public void close() {}
-
-    @Override
-    public void ack(Object msgId) {}
-
-    @Override
-    public void fail(Object msgId) {}
 }
